@@ -12,8 +12,8 @@ android {
         applicationId = "com.yucl.etfshare"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -49,8 +49,10 @@ android {
     }
 
     androidResources {
-        // 初始数据快照已压缩，无需再压
-        noCompress += listOf("gz")
+        // 初始数据快照已压缩（.gz），且导入时按块流式拷贝：
+        // 让 sqlite 资产以「不压缩」方式存入 APK，AssetManager.openFd() 才能生效，
+        // 避免把 8MB 数据一次性读进堆内存（低内存机型会 OOM 导致本地无数据）。
+        noCompress += listOf("gz", "sqlite", "db")
     }
 }
 

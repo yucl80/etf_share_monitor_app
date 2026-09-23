@@ -19,6 +19,15 @@ import kotlin.math.abs
  */
 object ReportCalc {
 
+    /**
+     * 已解析日期的份额记录。
+     *
+     * 首屏汇总时的热点是「为每只 ETF 的每个窗口挑选基期」，如果每次都重新
+     * `LocalDate.parse`，16 万+ 条快照 × 5 个窗口会产生百万次解析，在中低端
+     * 手机上会让首屏明显发卡。因此这里一次性把日期解析成 epochDay 缓存起来。
+     */
+    internal class Dated(val date: String, val shares: Double, val epochDay: Long)
+
     fun computeEtfChanges(db: Db): Map<String, EtfChange> {
         val all = db.getAllShares()
         val meta = db.getMeta()
@@ -27,13 +36,15 @@ object ReportCalc {
 
         for ((code, records) in all) {
             if (records.isEmpty()) continue
-            val sorted = records.sortedBy { it.date }
-            val cur: ShareRecord = sorted.last()
-            val curDate = LocalDate.parse(cur.date)
+            val dated = records
+                .sortedBy { it.date }
+                .map { Dated(it.date, it.shares, LocalDate.parse(it.date).toEpochDay()) }
+            val cur = dated.last()
+            val curDate = LocalDate.ofEpochDay(cur.epochDay)
             val windows = HashMap<String, WindowStat?>()
 
             for (spec in Windows.ALL) {
-                val picked = pickBase(sorted, spec, today, curDate)
+                val picked = pickBaseDated(dated, spec, today, curDate)
                 windows[spec.key] = picked?.let { (b, gap) ->
                     val delta = cur.shares - b.shares
                     WindowStat(
@@ -75,16 +86,30 @@ object ReportCalc {
         spec: WindowSpec,
         today: LocalDate,
         curDate: LocalDate,
-    ): Pair<ShareRecord, Double>? {
+    ): Pair<ShareRecord, Double>? =
+        pickBaseDated(
+            sorted.map { Dated(it.date, it.shares, LocalDate.parse(it.date).toEpochDay()) },
+            spec,
+            today,
+            curDate,
+        )?.let { (d, gap) -> ShareRecord(d.date, d.shares) to gap }
+
+    internal fun pickBaseDated(
+        dated: List<Dated>,
+        spec: WindowSpec,
+        today: LocalDate,
+        curDate: LocalDate,
+    ): Pair<Dated, Double>? {
         val curEpoch = curDate.toEpochDay() * 86_400L
         val newestAllowed = curEpoch - spec.days * 43_200L // days * 0.5 天
-        val target = today.minusDays(spec.days.toLong())
-        var best: ShareRecord? = null
-        var bestGap = Double.MAX_VALUE
-        for (r in sorted) {
-            val d = LocalDate.parse(r.date)
-            if (d.toEpochDay() * 86_400L > newestAllowed) continue
-            val gap = abs(ChronoUnit.DAYS.between(target, d)).toDouble()
+        // 目标日 = 今日 - N 天；天数差直接用 epochDay 相减（天粒度），
+        // 与 ChronoUnit.DAYS.between 完全等价，但省掉热循环里的对象创建。
+        val targetEpoch = today.toEpochDay() - spec.days
+        var best: Dated? = null
+        var bestGap = Long.MAX_VALUE
+        for (r in dated) {
+            if (r.epochDay * 86_400L > newestAllowed) continue
+            val gap = abs(r.epochDay - targetEpoch)
             if (gap > spec.tol) continue
             if (gap < bestGap) {
                 bestGap = gap
@@ -92,7 +117,7 @@ object ReportCalc {
             }
         }
         val b = best ?: return null
-        return b to bestGap
+        return b to bestGap.toDouble()
     }
 
     /** 按指数代码汇总：份额总数 + 各窗口变化求和，并保留成分 ETF 明细。 */

@@ -141,6 +141,12 @@ fun ReportScreen(vm: MainViewModel) {
                                 onClick = { menuOpen = false; vm.updateAutoDaily(!vm.autoDaily) },
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Text(if (vm.autoOnLaunch) "关闭启动时自动更新" else "开启启动时自动更新")
+                                },
+                                onClick = { menuOpen = false; vm.updateAutoOnLaunch(!vm.autoOnLaunch) },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("运行日志") },
                                 onClick = { menuOpen = false; showLog = true },
                             )
@@ -204,7 +210,11 @@ fun ReportScreen(vm: MainViewModel) {
             if (visibleRows.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        if (vm.etfCount == 0) "本地暂无数据，点右上角刷新抓取" else "没有匹配的指数",
+                        when {
+                            vm.busy -> "正在抓取数据（首次约 1~3 分钟）…"
+                            vm.shareRows == 0L -> "本地暂无数据 · 已自动开始抓取，请稍候"
+                            else -> "没有匹配的指数"
+                        },
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

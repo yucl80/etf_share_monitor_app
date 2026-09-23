@@ -20,13 +20,40 @@ A股场内 ETF 份额变化监控 —— **用 Kotlin 原生重写的 Android �
 | 多窗口变化 | 最近 1日 / 1周 / 1月 / 3月 / 6月 份额变化，单位「亿份」，同时给出变化率与基期日期 |
 | 点击表头排序 | 任意列升降序；**默认按最近 1 日降序**；无数据的行恒排末尾 |
 | 点击行下钻 | 弹出该指数的成分 ETF 明细（代码 / 名称 / 份额总数 / 各窗口增减），明细内同样可排序，底部有合计行 |
+| **启动即自动检查** | 打开 App 先直接用本地数据渲染，再检查「今天是否已刷新」：已刷新则完全不联网，未刷新则**自动抓取**，无需手动点刷新 |
 | 本地增量存储 | 原生 SQLite 落库，逐日累积；只抓缺失部分 |
-| 智能跳过重复抓取 | 当日已抓到数据 / 非工作日 / 未到份额日报发布时点 → 不再联网 |
+| 本地数据自愈 | 启动时校验本地库（能否打开 / 核心表是否有数据），缺失、损坏或为空则自动重新导入内置快照 |
+| 智能跳过重复抓取 | 当日已抓到数据 / 近期已抓取（15 分钟冷却）/ 非工作日 / 未到份额日报发布时点 → 不再联网 |
 | 定时自动更新 | WorkManager 每日约 19:05 自动抓取，完成后发通知（可关闭） |
-| 首次免久等 | 首次启动导入打包在 assets 里的数据快照，秒级可用，只需增量抓取 |
+| 首次免久等 | 首次启动导入打包在 assets 里的数据快照（约 1700 只 ETF / 10 万条份额），秒级可用，只需增量抓取 |
 | 深色模式 | 跟随系统 |
 
 **颜色约定**：份额增加红色、减少绿色（A股惯例，与欧美相反）。
+
+---
+
+## 启动与本地数据策略
+
+App 的启动流程（对应 `App.kt` / `MainViewModel.autoCheck()`）：
+
+```
+Application.onCreate
+  └─ Db.ensureLocalData()          本地库不存在 / 打不开 / 核心表为空 → 从 assets 重新导入快照
+  └─ 注册每日后台任务（WorkManager，约 19:05）
+MainActivity → MainViewModel.init
+  ├─ 1. 读本地库并渲染首屏（不等待网络，无需任何点击）
+  └─ 2. 自动检查「今日是否已刷新」（UpdatePolicy.decideOnLaunch）
+         ├─ 已刷新 / 非工作日 / 未到 18:00 发布时点 / 15 分钟内刚抓过 → 不联网，直接用本地数据显示
+         └─ 今日尚未抓取 → 自动抓取 → 落库 → 重算 → 刷新界面
+回到前台（onStart）→ 同一天只再检查一次（跨天时会重新检查）
+```
+
+要点：
+
+* **抓到的数据一律先落 SQLite**（`etf_meta` / `shares_daily` / `run_state`），所以离线也能看到上一次的数据。
+* 手动刷新（右上角 ⟳）与自动抓取共用同一条流程；菜单里的「强制重新抓取」可忽略「今日已抓取」标记。
+* 菜单可单独关闭「启动时自动更新」或「每日自动更新」，关闭后启动只读本地数据。
+* 初始快照以**流式拷贝**落盘（`AssetManager.openFd` + 16KB 缓冲），不会把 8MB 数据一次性读进堆内存。
 
 ---
 
@@ -64,6 +91,19 @@ echo "sdk.dir=/path/to/android-sdk" > local.properties
 依赖仓库已在 `settings.gradle.kts` 中配置国内镜像（阿里云 google / central / gradle-plugin），
 在 `dl.google.com` 不可达的网络下也能正常构建。
 
+### 单元测试
+
+```bash
+gradle testDebugUnitTest
+```
+
+覆盖 26 项：xlsx 解析、文本相似度、基期选取与排序口径、**「今日是否需要联网抓取」判定**（含冷却、非工作日、发布时点等分支）。
+
+### 安装包
+
+构建后在仓库根目录留一份可直接安装的副本：`etf-share-monitor-<版本>-debug.apk`（传到手机点击安装即可）。
+二进制不入库（`*.apk` 在 `.gitignore` 中），需要时本地 `gradle assembleDebug` 重新产出。
+
 ---
 
 ## 工程结构
@@ -77,16 +117,17 @@ app/src/main/java/com/yucl/etfshare/
 │   └── Text.kt                # 相似度（LCS）、数字与日期解析
 ├── data/
 │   ├── Models.kt              # 数据模型 + 变化窗口定义
-│   ├── Db.kt                  # SQLiteOpenHelper + DAO + 初始快照导入
+│   ├── Db.kt                  # SQLiteOpenHelper + DAO + 初始快照流式导入与自检
+│   ├── Prefs.kt               # 开关类配置（启动自动更新 / 每日自动更新）
 │   ├── IndexDict.kt           # 中证/国证官网全量指数字典（约 4480 条）+ 名称归一化
 │   └── Sources.kt             # 全部官网接口封装（11 个数据源）
 ├── domain/
 │   ├── Updater.kt             # 更新流程：交易所官方份额 -> 兜底 -> F10 -> 映射纠错
-│   ├── ReportCalc.kt          # 指数维度汇总 + 排序比较器
-│   └── UpdatePolicy.kt        # 「今日是否还需要抓取」判定
+│   ├── ReportCalc.kt          # 指数维度汇总 + 排序比较器（日期预解析，首屏更快）
+│   └── UpdatePolicy.kt        # 「今日是否还需要抓取」判定（纯函数，便于单测）
 ├── ui/
-│   ├── MainActivity.kt        # 入口（Compose）
-│   ├── MainViewModel.kt       # 状态与流程编排
+│   ├── MainActivity.kt        # 入口（Compose），onStart 触发启动检查
+│   ├── MainViewModel.kt       # 状态与流程编排（首屏读本地 → 自动检查 → 自动抓取）
 │   ├── ReportScreen.kt        # 主表格 + 下钻明细弹窗 + 日志
 │   ├── Theme.kt / Fmt.kt      # 主题与格式化
 └── work/

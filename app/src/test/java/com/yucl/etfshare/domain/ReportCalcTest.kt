@@ -97,4 +97,26 @@ class ReportCalcTest {
             ReportCalc.defaultSorted(rows).map { it.indexCode },
         )
     }
+
+    /**
+     * 性能优化后的重载（预解析 epochDay）必须与「每次重新 parse 日期」的旧口径完全一致，
+     * 否则首屏 1 日/1 周等列会静默算错。
+     */
+    @Test
+    fun datedOverloadMatchesRecordOverload() {
+        val records = recs(
+            "2026-06-30" to 100.0,
+            "2026-08-25" to 75.0,
+            "2026-09-22" to 90.0,
+        )
+        val dated = records.map {
+            ReportCalc.Dated(it.date, it.shares, LocalDate.parse(it.date).toEpochDay())
+        }
+        for (spec in Windows.ALL) {
+            val a = ReportCalc.pickBase(records, spec, today, curDate)
+            val b = ReportCalc.pickBaseDated(dated, spec, today, curDate)
+            assertEquals(a?.first?.date, b?.first?.date)
+            assertEquals(a?.second ?: -1.0, b?.second ?: -1.0, 1e-9)
+        }
+    }
 }

@@ -21,6 +21,7 @@ import com.yucl.etfshare.App
 import com.yucl.etfshare.R
 import com.yucl.etfshare.data.Db
 import com.yucl.etfshare.data.IndexDict
+import com.yucl.etfshare.data.Prefs
 import com.yucl.etfshare.data.Sources
 import com.yucl.etfshare.domain.ReportCalc
 import com.yucl.etfshare.domain.UpdatePolicy
@@ -93,19 +94,15 @@ class DailyUpdateWorker(
 object DailyUpdateScheduler {
 
     private const val UNIQUE_NAME = "etf-daily-update"
-    private const val PREFS = "etf_prefs"
-    private const val KEY_ENABLED = "auto_daily"
 
     /** 默认运行时间：每日 19:05（份额日报通常 18:00 后发布）。 */
     private const val TARGET_HOUR = 19
     private const val TARGET_MINUTE = 5
 
-    fun isEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ENABLED, true)
+    fun isEnabled(context: Context): Boolean = Prefs.autoDaily(context)
 
     fun setEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_ENABLED, enabled).apply()
+        Prefs.setAutoDaily(context, enabled)
         if (enabled) schedule(context) else cancel(context)
     }
 
