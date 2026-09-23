@@ -44,4 +44,23 @@ object Text {
         val m = Regex("^(\\d{4})[/.](\\d{1,2})[/.](\\d{1,2})$").find(t) ?: return null
         return "%s-%02d-%02d".format(m.groupValues[1], m.groupValues[2].toInt(), m.groupValues[3].toInt())
     }
+
+    /**
+     * 把名称裁剪到最多 [maxChars] 个字符（按码点计数，即「字数」）。
+     *
+     * 超出时保留前 `maxChars - 1` 个字符并以 `…` 结尾，
+     * 让**含省略号的显示长度也恰好不超过 maxChars**。
+     * 这一点很关键：若写成「截 maxChars 个再补省略号」，实际显示会多出 1 个字，
+     * 按「N 个全角字」预留的列宽就又会溢出。
+     *
+     * 按码点截断可避免把代理对（emoji、生僻扩展字）从中间劈开。
+     */
+    fun clip(s: String, maxChars: Int = 10): String {
+        if (maxChars <= 0) return ""
+        val t = s.trim()
+        if (t.isEmpty()) return t
+        if (t.codePointCount(0, t.length) <= maxChars) return t
+        val end = t.offsetByCodePoints(0, maxChars - 1)
+        return t.substring(0, end) + "…"
+    }
 }

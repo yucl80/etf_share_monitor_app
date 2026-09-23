@@ -57,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.yucl.etfshare.core.Text as TextUtil
 import com.yucl.etfshare.data.IndexRow
 import com.yucl.etfshare.data.WindowStat
 import com.yucl.etfshare.data.Windows
@@ -66,15 +67,20 @@ import com.yucl.etfshare.domain.ReportCalc
 private val W_CODE = 76.dp
 
 /**
- * 指数名称 / ETF 名称列宽。
- *
- * 主表已去掉「ETF数」列（成分数量改为在名称下方以「N 只成分」小字呈现），
- * 腾出的 50dp 直接并入名称列，使长指数名显示更完整；
- * 这样整表总宽与旧版完全一致，右侧份额与各窗口数字列的位置不会发生跳动。
+ * 主表「指数名称」列宽：恰好容纳 [NAME_MAX_CHARS] 个 12sp 全角字
+ * （10 × 12 = 120dp）再加左右各 6dp 内边距，共 132dp。
+ * 名称按字数硬截断，所以列宽可以按「10 字」精确预留，不再依赖自动省略。
  */
-private val W_NAME = 196.dp
+private val W_NAME = 132.dp
+
+/** 明细弹窗的「ETF 名称」列：基金全称较长，这里不截断，单独保留较宽的一列。 */
+private val W_MEMBER_NAME = 146.dp
+
 private val W_SHARES = 98.dp
 private val W_WIN = 98.dp
+
+/** 主表指数名称最多显示的字数（含省略号，超出即截断）。 */
+private const val NAME_MAX_CHARS = 10
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -371,7 +377,12 @@ private fun IndexTableRow(
                 maxLines = 1,
             )
             Column(Modifier.width(W_NAME).padding(horizontal = 6.dp)) {
-                Text(row.indexName, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    TextUtil.clip(row.indexName, NAME_MAX_CHARS),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     "${row.etfCount} 只成分",
                     fontSize = 9.sp,
@@ -467,7 +478,7 @@ private fun DetailSheet(row: IndexRow, onDismiss: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     HeaderCell("ETF代码", W_CODE, "code", sortKey, ascending, false, toggle)
-                    HeaderCell("ETF名称", W_NAME, "name", sortKey, ascending, false, toggle)
+                    HeaderCell("ETF名称", W_MEMBER_NAME, "name", sortKey, ascending, false, toggle)
                     HeaderCell("份额总数", W_SHARES, "shares", sortKey, ascending, true, toggle)
                     for (spec in Windows.ALL) {
                         HeaderCell(spec.label, W_WIN, spec.key, sortKey, ascending, true, toggle)
@@ -491,7 +502,7 @@ private fun DetailSheet(row: IndexRow, onDismiss: () -> Unit) {
                         )
                         Text(
                             m.name,
-                            modifier = Modifier.width(W_NAME).padding(horizontal = 6.dp),
+                            modifier = Modifier.width(W_MEMBER_NAME).padding(horizontal = 6.dp),
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -536,7 +547,7 @@ private fun TotalsRow(row: IndexRow, hScroll: androidx.compose.foundation.Scroll
             )
             Text(
                 "${row.etfCount} 只",
-                modifier = Modifier.width(W_NAME).padding(horizontal = 6.dp),
+                modifier = Modifier.width(W_MEMBER_NAME).padding(horizontal = 6.dp),
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
