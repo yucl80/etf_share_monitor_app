@@ -12,6 +12,7 @@ import com.yucl.etfshare.work.DailyUpdateScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 
@@ -67,6 +68,9 @@ class App : Application() {
             private set
 
         /** 本地数据准备结果；尚未完成时给出「进行中」状态。 */
+        // getCompleted() 属于协程的实验性 API（同步取已完成任务的值），
+        // 这里已在 isCompleted 为真之后才调用，语义安全。
+        @OptIn(ExperimentalCoroutinesApi::class)
         val seedStatus: LocalDataStatus
             get() {
                 val d = localDataReady ?: return PENDING

@@ -11,6 +11,9 @@ captures/
 *.apk
 *.aab
 *.keystore
+*.jks
+keystore/
+keystore.properties
 output.json
 
 # 系统

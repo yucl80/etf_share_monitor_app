@@ -106,12 +106,41 @@ MainActivity → MainViewModel.init
 ```bash
 # 需要 JDK 17 与 Android SDK（platform-35 + build-tools;35.0.0）
 echo "sdk.dir=/path/to/android-sdk" > local.properties
-./gradlew assembleDebug          # 或使用本机 gradle：gradle assembleDebug
+./gradlew assembleDebug            # 或使用本机 gradle：gradle assembleDebug
 # 产物：app/build/outputs/apk/debug/app-debug.apk
+
+./gradlew assembleRelease          # 正式版（需签名配置，见下）
+# 产物：app/build/outputs/apk/release/app-release.apk
 ```
 
 依赖仓库已在 `settings.gradle.kts` 中配置国内镜像（阿里云 google / central / gradle-plugin），
 在 `dl.google.com` 不可达的网络下也能正常构建。
+
+### Release 签名
+
+Release 构建的密钥**不进版本库**，通过工程根目录的 `keystore.properties` 提供（已被 `.gitignore` 排除）：
+
+```properties
+storeFile=keystore/etf-share-monitor.jks
+storePassword=***
+keyAlias=etf-share-monitor
+keyPassword=***
+```
+
+密钥库位于 `keystore/etf-share-monitor.jks`（RSA 2048 / 有效期 30 年 / PKCS12）。
+`keystore.properties` 不存在时 release 构建不会报错，但产物为**未签名**、无法直接安装——
+这样他人克隆仓库也能正常编译调试包。
+
+> ⚠️ **请务必备份 `keystore/` 与 `keystore.properties`**。Android 要求升级包的签名与已装版本一致，
+> 密钥一旦丢失，老用户只能卸载重装（本地攒下的历史份额数据会随之清空）。
+
+重新生成密钥（仅在没有旧密钥、且可以接受「必须卸载重装」时执行）：
+
+```bash
+keytool -genkeypair -v -keystore keystore/etf-share-monitor.jks -storetype PKCS12 \
+  -alias etf-share-monitor -keyalg RSA -keysize 2048 -validity 10950 \
+  -dname "CN=your-name, O=personal, C=CN"
+```
 
 ### 单元测试
 
@@ -119,12 +148,21 @@ echo "sdk.dir=/path/to/android-sdk" > local.properties
 gradle testDebugUnitTest
 ```
 
-覆盖 26 项：xlsx 解析、文本相似度、基期选取与排序口径、**「今日是否需要联网抓取」判定**（含冷却、非工作日、发布时点等分支）。
+覆盖 30 项：xlsx 解析、文本截断与相似度、基期选取与排序口径、
+**「今日是否需要联网抓取」判定**（含冷却、非工作日、发布时点等分支），
+以及 1 项**首屏汇总性能压测**（10.2 万条快照，实测 58~83ms）。
 
 ### 安装包
 
-构建后在仓库根目录留一份可直接安装的副本：`etf-share-monitor-<版本>-debug.apk`（传到手机点击安装即可）。
-二进制不入库（`*.apk` 在 `.gitignore` 中），需要时本地 `gradle assembleDebug` 重新产出。
+发布版：`etf-share-monitor-<版本>-release.apk` —— 已签名、`debuggable=false`，见
+[Releases](https://github.com/yucl80/etf_share_monitor_app/releases) 页直接下载。
+构建后在仓库根目录也留一份副本（传到手机点击安装即可）。
+
+二进制不入库（`*.apk` 在 `.gitignore` 中），需要时本地 `gradle assembleRelease` 重新产出。
+
+> **从 debug 版升到 release 版必须卸载重装**：两者签名不同（debug 用 Android SDK 自动生成的调试密钥），
+> Android 会因签名不匹配拒绝覆盖安装。卸载会清空 `databases/etf_shares.db`，
+> 但重新装好后会自动导入内置快照并联网补齐，无需手工操作。
 
 ---
 
