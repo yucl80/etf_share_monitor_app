@@ -64,8 +64,15 @@ import com.yucl.etfshare.data.YI
 import com.yucl.etfshare.domain.ReportCalc
 
 private val W_CODE = 76.dp
-private val W_NAME = 146.dp
-private val W_COUNT = 50.dp
+
+/**
+ * 指数名称 / ETF 名称列宽。
+ *
+ * 主表已去掉「ETF数」列（成分数量改为在名称下方以「N 只成分」小字呈现），
+ * 腾出的 50dp 直接并入名称列，使长指数名显示更完整；
+ * 这样整表总宽与旧版完全一致，右侧份额与各窗口数字列的位置不会发生跳动。
+ */
+private val W_NAME = 196.dp
 private val W_SHARES = 98.dp
 private val W_WIN = 98.dp
 
@@ -297,7 +304,6 @@ private fun TableHeader(
         ) {
             HeaderCell("指数代码", W_CODE, "code", sortKey, ascending, false, onSort)
             HeaderCell("指数名称", W_NAME, "name", sortKey, ascending, false, onSort)
-            HeaderCell("ETF数", W_COUNT, "count", sortKey, ascending, true, onSort)
             HeaderCell("份额总数", W_SHARES, "shares", sortKey, ascending, true, onSort)
             for (spec in Windows.ALL) {
                 HeaderCell(spec.label, W_WIN, spec.key, sortKey, ascending, true, onSort)
@@ -372,13 +378,6 @@ private fun IndexTableRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text(
-                row.etfCount.toString(),
-                modifier = Modifier.width(W_COUNT).padding(horizontal = 6.dp),
-                fontSize = 12.sp,
-                textAlign = TextAlign.End,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Text(
                 Fmt.yi(row.shares / YI),
                 modifier = Modifier.width(W_SHARES).padding(horizontal = 6.dp),
