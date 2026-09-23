@@ -9,20 +9,29 @@ import com.yucl.etfshare.data.Db
 import com.yucl.etfshare.data.IndexDict
 import com.yucl.etfshare.data.LocalDataStatus
 import com.yucl.etfshare.work.DailyUpdateScheduler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 
 class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // 保证本地一定有可用数据：数据库缺失/损坏/为空时重新导入打包的初始快照，
-        // 这样首屏直接就有数据可看，不必等联网、也不必手动点刷新。
-        seedStatus = try {
-            Db.ensureLocalData(this)
-        } catch (t: Throwable) {
-            // 连 OutOfMemoryError 这类错误也要兜住：宁可退回联网抓取，也不能一起动就崩
-            Log.w(TAG, "本地数据准备失败", t)
-            LocalDataStatus(false, false, "本地数据准备失败：${t.message}")
+        // 本地数据准备（可能要解压 8MB 快照、打开数据库做校验）**放到后台线程**。
+        // 之前是在这里同步执行的，Application.onCreate 挡住主线程就等于挡住第一帧，
+        // 表现就是「打开 App 先白屏一会儿才出界面」。界面在真正读库之前 await 它。
+        localDataReady = appScope.async(Dispatchers.IO) {
+            try {
+                Db.ensureLocalData(this@App)
+            } catch (t: Throwable) {
+                // 连 OutOfMemoryError 这类错误也要兜住：宁可退回联网抓取，也不能一起动就崩
+                Log.w(TAG, "本地数据准备失败", t)
+                LocalDataStatus(false, false, "本地数据准备失败：${t.message}")
+            }
         }
+        // 这两个只是构造对象（不打开数据库），开销可忽略
         Db.get(this)
         IndexDict.get(this)
         createChannel()
@@ -49,9 +58,23 @@ class App : Application() {
         const val CHANNEL_ID = "etf_update"
         private const val TAG = "App"
 
-        /** 启动时本地数据准备的结果，界面用它给出「数据从哪来」的提示。 */
+        /** 后台专用作用域：只跑本地数据准备这类一次性任务。 */
+        private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        /** 本地数据准备任务；界面在读数之前 await 它，避免与导入过程抢文件。 */
         @Volatile
-        var seedStatus: LocalDataStatus = LocalDataStatus(true, false, "未初始化")
+        var localDataReady: Deferred<LocalDataStatus>? = null
             private set
+
+        /** 本地数据准备结果；尚未完成时给出「进行中」状态。 */
+        val seedStatus: LocalDataStatus
+            get() {
+                val d = localDataReady ?: return PENDING
+                if (!d.isCompleted) return PENDING
+                return runCatching { d.getCompleted() }
+                    .getOrElse { LocalDataStatus(false, false, "本地数据准备失败：${it.message}") }
+            }
+
+        private val PENDING = LocalDataStatus(true, false, "正在准备本地数据…")
     }
 }

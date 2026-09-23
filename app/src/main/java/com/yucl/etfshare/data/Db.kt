@@ -4,8 +4,10 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.os.SystemClock
 import android.util.Log
 import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
 import java.io.PushbackInputStream
 import java.time.LocalDate
@@ -28,6 +30,15 @@ class Db private constructor(context: Context) :
         const val SEED_DB_GZ = "seed_db.sqlite.gz"
         const val SEED_DICT = "seed_index_dict.json"
         const val SEED_DICT_GZ = "seed_index_dict.json.gz"
+
+        /** SQLite 文件头魔数（16 字节，含结尾的 \0）。 */
+        private const val SQLITE_MAGIC = "SQLite format 3\u0000"
+
+        /**
+         * 「体积明显偏小即视为写坏」的下限。
+         * 正常本地库内置快照就有 8MB 以上，低于此值说明写入被中断或库是空的。
+         */
+        private const val MIN_DB_BYTES = 128L * 1024
 
         @Volatile
         private var instance: Db? = null
@@ -101,31 +112,70 @@ class Db private constructor(context: Context) :
         /**
          * 启动时准备本地数据（幂等，可重复调用）。
          *
-         * 与旧版只在「文件不存在」时导入不同，这里会**校验**已有数据：
-         * 若数据库缺失、损坏或份额表为空（例如上次导入被系统中断），
-         * 就重新从 assets 导入快照。这样「首屏一定有数据可看」，
-         * 不需要用户手动点刷新。
+         * 判定顺序从廉价到昂贵，尽量少碰磁盘：
+         *   1. 文件不存在                            -> 导入快照
+         *   2. 文件头不是 SQLite / 体积明显偏小（写入被中断）-> 导入快照
+         *   3. 深度校验（能否打开 + 核心表是否有数据）失败  -> 导入快照
+         *   4. 以上都通过 -> **沿用已有数据，不重新导入**
+         *
+         * 第 4 条是「当天已抓取就跳过联网」能否成立的前提：一旦重新导入，
+         * run_state 里的「今日已抓取」标记会被清掉，重启就会再抓一遍。
+         * 所以这里只在**确实坏掉**时才替换数据，并保留旧库备份。
+         *
+         * 注意：本函数会打开数据库、必要时还会解压 8MB 快照落盘，
+         * 必须在后台线程调用（见 App.onCreate），否则会挡住首帧。
          */
         fun ensureLocalData(context: Context): LocalDataStatus {
+            val t0 = SystemClock.elapsedRealtime()
             val dbFile = context.getDatabasePath(DB_NAME)
             var imported = false
-            var message: String
+            var verified: Boolean
+            val message: String
 
             if (!dbFile.exists()) {
                 imported = importSeedDb(context, dbFile)
+                verified = imported
                 message = if (imported) "已导入初始数据快照" else "初始数据导入失败，将自动联网抓取"
-            } else if (!usable(dbFile)) {
-                Log.w(TAG, "本地数据库校验未通过（缺失/损坏/为空），重新导入初始数据")
+            } else if (!looksIntact(dbFile)) {
+                Log.w(TAG, "本地数据库文件异常（文件头/体积不对），重新导入初始数据")
                 imported = importSeedDb(context, dbFile)
+                verified = imported
+                message = if (imported) "本地数据异常，已重新导入初始数据快照" else "本地数据异常且导入失败，将自动联网抓取"
+            } else if (!usable(dbFile)) {
+                Log.w(TAG, "本地数据库深度校验未通过（打不开或核心表为空），重新导入初始数据")
+                imported = importSeedDb(context, dbFile)
+                verified = imported
                 message = if (imported) "本地数据异常，已重新导入初始数据快照" else "本地数据异常且导入失败，将自动联网抓取"
             } else {
-                message = "沿用本地已有数据"
+                // 关键路径：数据好好的，什么都不做。既不动 run_state，也不解压快照。
+                verified = true
+                message = "沿用本地已有数据（未重新导入）"
             }
 
             importSeedDict(context)
-            val ok = dbFile.exists() && usable(dbFile)
-            Log.i(TAG, "本地数据准备: ok=$ok imported=$imported ($message)")
-            return LocalDataStatus(ok, imported, message)
+            val ms = SystemClock.elapsedRealtime() - t0
+            Log.i(TAG, "本地数据准备: ok=$verified imported=$imported ${ms}ms ($message)")
+            return LocalDataStatus(verified, imported, message, ms)
+        }
+
+        /**
+         * 廉价体检：只读文件头 16 字节，不打开数据库、不做任何查询。
+         *
+         * 用来挡住「库文件缺失 / 被写坏 / 系统在写入途中杀进程」这类明显异常，
+         * 又能避免每次启动都做一次昂贵的深度校验（全表 COUNT）。
+         */
+        private fun looksIntact(dbFile: File): Boolean {
+            if (!dbFile.isFile) return false
+            if (dbFile.length() < MIN_DB_BYTES) return false
+            return try {
+                FileInputStream(dbFile).use { input ->
+                    val head = ByteArray(16)
+                    input.read(head) == 16 && String(head, Charsets.US_ASCII) == SQLITE_MAGIC
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "数据库文件头读取失败: ${e.message}")
+                false
+            }
         }
 
         /** 指数字典缓存（缺失时才写入）。 */
@@ -137,9 +187,19 @@ class Db private constructor(context: Context) :
             }
         }
 
-        /** 通过「能打开 + 两类核心表都有数据」判断数据库是否可用。 */
+        /**
+         * 深度校验：能否打开 + 两张核心表是否都有数据。
+         *
+         * 这里刻意用 OPEN_READWRITE 而不是 OPEN_READONLY。
+         * 本地库由本应用独占，而且跑在 WAL 模式下；WAL 库用**只读**方式打开时
+         * 需要能创建/写入 `-shm` 文件，部分系统与 SQLite 版本会直接抛
+         * `SQLiteException: unable to open database file`。
+         * 一旦被误判成「库坏了」，就会把好端端的数据删掉重新导入
+         * （连带清空「今日已抓取」标记），表现正是
+         * 「每次启动都重新导入 + 又联网抓一遍 + 启动很慢」。用读写方式打开没有这个坑。
+         */
         fun usable(dbFile: File): Boolean = try {
-            SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).use { d ->
+            SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READWRITE).use { d ->
                 val shares = d.rawQuery("SELECT COUNT(*) FROM shares_daily", null).use { c ->
                     if (c.moveToFirst()) c.getLong(0) else 0L
                 }
@@ -153,19 +213,44 @@ class Db private constructor(context: Context) :
             false
         }
 
+        /**
+         * 删除数据库及其全部旁挂文件。
+         *
+         * 只删 `.db` 是不够的：WAL 模式下还有 `-wal` / `-shm`（以及旧式回滚日志 `-journal`），
+         * 它们属于**旧**数据库。若只换掉 `.db` 而留下旧的 `-wal`，
+         * 下次打开时 SQLite 会尝试把旧 WAL 恢复进新文件，轻则报错、重则数据错乱，
+         * 于是又触发一次「重新导入」，形成「每次启动都重导」的死循环。
+         */
+        private fun wipeDbFiles(dbFile: File) {
+            val siblings = listOf(
+                dbFile,
+                File(dbFile.path + "-wal"),
+                File(dbFile.path + "-shm"),
+                File(dbFile.path + "-journal"),
+            )
+            for (f in siblings) {
+                if (f.exists() && !f.delete()) Log.w(TAG, "无法删除 ${f.name}")
+            }
+        }
+
         /** 把 assets 里的初始快照解压落盘，并做完整校验。 */
         private fun importSeedDb(context: Context, dbFile: File): Boolean = try {
             dbFile.parentFile?.mkdirs()
-            if (dbFile.exists() && !dbFile.delete()) {
-                throw IllegalStateException("无法覆盖旧数据库: ${dbFile.path}")
+            // 先把旧库改名备份而不是直接删除：万一这次替换是误判，用户攒下的历史还在
+            if (dbFile.exists()) {
+                val bak = File(dbFile.path + ".broken")
+                runCatching { if (bak.exists()) bak.delete() }
+                if (!dbFile.renameTo(bak)) Log.w(TAG, "旧数据库备份失败，将直接覆盖")
             }
+            wipeDbFiles(dbFile)
             val written = copySeedTo(context, dbFile, SEED_DB, SEED_DB_GZ)
             if (written <= 0) {
                 throw IllegalStateException("assets 中未找到初始数据快照（$SEED_DB / $SEED_DB_GZ）")
             }
             if (!usable(dbFile)) throw IllegalStateException("导入后的数据库校验未通过")
             SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READWRITE).use { d ->
-                // 清空运行状态，避免手机端误判「今日已抓取」而跳过更新
+                // 数据已被换成快照，旧的运行状态不再可信，必须清空，
+                // 否则会误判「今日已抓取」而跳过本该进行的抓取。
                 d.execSQL("DELETE FROM run_state")
                 d.execSQL(
                     "INSERT OR REPLACE INTO run_state(key,value) VALUES('seed_imported_at',?)",
@@ -404,4 +489,6 @@ data class LocalDataStatus(
     val ok: Boolean,
     val imported: Boolean,
     val message: String,
+    /** 本次准备占用的毫秒数，用于回答「启动慢在哪一步」。 */
+    val elapsedMs: Long = 0L,
 )

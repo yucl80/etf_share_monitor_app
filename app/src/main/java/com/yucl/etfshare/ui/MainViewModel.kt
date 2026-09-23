@@ -1,6 +1,7 @@
 package com.yucl.etfshare.ui
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -10,6 +11,7 @@ import com.yucl.etfshare.App
 import com.yucl.etfshare.data.Db
 import com.yucl.etfshare.data.IndexDict
 import com.yucl.etfshare.data.IndexRow
+import com.yucl.etfshare.data.LocalDataStatus
 import com.yucl.etfshare.data.Prefs
 import com.yucl.etfshare.data.Sources
 import com.yucl.etfshare.domain.ReportCalc
@@ -22,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalDate
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -76,25 +79,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val unknown: Int,
         val snapshot: String,
         val shareRows: Long,
+        /** 本地数据摘要；在 IO 线程算好，避免在主线程再查三次库。 */
+        val summary: String,
     )
 
     init {
         viewModelScope.launch {
-            // 1) 首屏立刻用本地数据渲染，不等待网络
+            val t0 = SystemClock.elapsedRealtime()
+            // 1) 等后台的本地数据准备结束（正常路径它只做一次文件头体检，开销极小）
+            val seed = awaitLocalData()
+            val tPrepared = SystemClock.elapsedRealtime() - t0
+            // 2) 读本地库 + 汇总，全部在 IO 线程完成，不联网
             val data = withContext(Dispatchers.IO) { compute() }
+            val tReady = SystemClock.elapsedRealtime() - t0
             apply(data)
             initialLoaded = true
-            val seed = App.seedStatus
             if (seed.imported) emit("本地数据初始化：${seed.message}")
             if (data.shareRows == 0L) {
                 status = "本地暂无数据，正在自动抓取…"
                 emit("本地数据库为空 —— 已自动开始联网抓取（无需手动点击刷新）")
             } else {
                 status = "本地数据 · 快照 ${data.snapshot}"
-                emit("已从本地数据库读取：${db.summary()}")
+                emit("已从本地数据库读取：${data.summary}")
             }
-            // 2) 再做「今日是否已刷新」的自动检查，未刷新就直接自动抓取
+            // 这段是回答「启动到底慢在哪一步」的关键日志：
+            //   本地数据检查 = 是否有库 / 是否需要重新导入（App 后台线程做的事）
+            //   读取+汇总   = 从 SQLite 读 10 万条份额并算 5 个窗口
+            emit(
+                "[启动耗时] 本地数据检查 ${seed.elapsedMs}ms（${seed.message}）｜ " +
+                    "等待+读取+汇总 ${tReady - tPrepared}ms（含等待 ${tPrepared}ms）｜ " +
+                    "首屏就绪 ${tReady}ms",
+            )
+            // 3) 再做「今日是否已刷新」的自动检查，未刷新就直接自动抓取
             autoCheck()
+        }
+    }
+
+    /**
+     * 等后台的本地数据准备结束。
+     *
+     * 正常路径（数据完好）几乎立刻返回；只有首次启动要导入快照时才会稍等。
+     * 加超时是为了「宁可先读一次本地库看结果，也不能把首屏卡死」。
+     */
+    private suspend fun awaitLocalData(): LocalDataStatus = withContext(Dispatchers.IO) {
+        try {
+            withTimeoutOrNull(LOCAL_DATA_WAIT_MS) { App.localDataReady?.await() }
+                ?: App.seedStatus
+        } catch (e: Exception) {
+            LocalDataStatus(false, false, "本地数据准备异常：${e.message}")
         }
     }
 
@@ -133,6 +165,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 UpdatePolicy.Decision(false, "读取运行状态失败：${e.message}")
             }
+            // 把判定依据原样打出来：这样「今天到底有没有抓过、为什么又要抓」一目了然，
+            // 不必靠猜（数据被清空 vs 判定逻辑不认为今天抓过，看这行就能分清）。
+            val diag = withContext(Dispatchers.IO) {
+                val st = UpdatePolicy.stateOf(db)
+                "上次抓取 ${st.lastFetchDate ?: "从未"} ${st.lastFetchTime?.takeLast(8) ?: "--:--:--"}" +
+                    "｜成功 ${if (st.lastFetchOk) "是" else "否"}" +
+                    "｜标记快照 ${st.latestSnapshot ?: "无"}" +
+                    "｜实际最新快照 ${db.latestShareDate() ?: "无"}" +
+                    "｜库内份额 ${db.countShareRows()} 条"
+            }
+            emit("[本地状态] $diag")
             if (decision.skip) {
                 emit("[启动检查] ${decision.reason} —— 直接展示本地数据，不联网")
                 status = if (rows.isEmpty()) {
@@ -190,7 +233,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val updater = Updater(db, sources, dict) { line -> emit(line) }
                 val result = updater.run(quick = false)
                 emit("本次耗时 ${Fmt.seconds(result.elapsedMs)}")
-                emit("数据已保存到本地：${db.summary()}")
+                emit("数据已保存到本地：${withContext(Dispatchers.IO) { db.summary() }}")
                 status = if (result.ok) "数据已更新并保存到本地" else "核心数据未完整获取，可稍后重试"
             }
             status = "正在汇总…"
@@ -221,13 +264,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun compute(): Computed {
         val changes = ReportCalc.computeEtfChanges(db)
+        val shareRows = db.countShareRows()
+        val snapshot = db.latestShareDate() ?: "—"
         val aggregated = ReportCalc.aggregateByIndex(changes)
         return Computed(
             rows = ReportCalc.defaultSorted(aggregated),
             etfCount = changes.size,
             unknown = changes.values.count { it.indexCode.isNullOrEmpty() },
-            snapshot = db.latestShareDate() ?: "—",
-            shareRows = db.countShareRows(),
+            snapshot = snapshot,
+            shareRows = shareRows,
+            summary = "ETF ${changes.size} 只 / 份额 $shareRows 条 / 快照 $snapshot",
         )
     }
 
@@ -241,5 +287,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun emit(line: String) {
         logFlow.update { it + line }
+    }
+
+    companion object {
+        /**
+         * 等本地数据准备完成的超时上限。
+         * 正常路径（数据完好）只做一次文件头体检，几千赫兹就返回；
+         * 只有首次启动要解压 8MB 快照时才会真正等待。超时也继续往下走，
+         * 宁可先读一遍本地库看结果，也不能把首屏卡死。
+         */
+        private const val LOCAL_DATA_WAIT_MS = 30_000L
     }
 }

@@ -2,6 +2,7 @@ package com.yucl.etfshare.domain
 
 import com.yucl.etfshare.data.Db
 import com.yucl.etfshare.data.EtfChange
+import com.yucl.etfshare.data.EtfMeta
 import com.yucl.etfshare.data.IndexRow
 import com.yucl.etfshare.data.ShareRecord
 import com.yucl.etfshare.data.WindowSpec
@@ -28,9 +29,19 @@ object ReportCalc {
      */
     internal class Dated(val date: String, val shares: Double, val epochDay: Long)
 
-    fun computeEtfChanges(db: Db): Map<String, EtfChange> {
-        val all = db.getAllShares()
-        val meta = db.getMeta()
+    fun computeEtfChanges(db: Db): Map<String, EtfChange> =
+        computeEtfChanges(db.getAllShares(), db.getMeta())
+
+    /**
+     * 纯数据入口：只吃「份额快照 + ETF 名单」，不依赖 Android/数据库。
+     *
+     * 这样首屏最热的一段计算就能在 JVM 单测里被度量与回归保护
+     * （见 ReportCalcPerfTest），也能确定「读取+汇总」到底要多久。
+     */
+    fun computeEtfChanges(
+        all: Map<String, List<ShareRecord>>,
+        meta: Map<String, EtfMeta>,
+    ): Map<String, EtfChange> {
         val today = LocalDate.now()
         val out = LinkedHashMap<String, EtfChange>()
 
