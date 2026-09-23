@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ETF份额监控</string>
+    <string name="app_subtitle">A股 ETF 份额变化 · 指数维度汇总</string>
+</resources>

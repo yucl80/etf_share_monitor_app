@@ -1,0 +1,11 @@
+# 统一行尾为 LF（跨平台协作 / CI 友好）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# 二进制资源不做行尾转换
+*.jar binary
+*.apk binary
+*.aab binary
+*.gz binary
+*.png binary
+*.jpg binary

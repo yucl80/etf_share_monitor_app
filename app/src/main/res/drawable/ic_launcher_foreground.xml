@@ -1,0 +1,25 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 柱状图：象征份额变化 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M30,66h8v16h-8z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M43,55h8v27h-8z" />
+    <path
+        android:fillColor="#FFFFC24B"
+        android:pathData="M56,44h8v38h-8z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M69,60h8v22h-8z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M26,86h56v4h-56z" />
+    <path
+        android:fillColor="#FFFFC24B"
+        android:pathData="M30,52l16,-12 12,7 20,-17 3,4 -22,19 -12,-7 -14,11z" />
+</vector>
